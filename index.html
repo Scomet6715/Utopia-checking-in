@@ -29,7 +29,7 @@
     </style>
 </head>
 <body>
-    <h2>扫码核销</h2>
+    <h2>扫码销</h2>
 
     <div>
         <button id="mainBtn" onclick="onMainBtnClick()" disabled>正在启动摄像头...</button>
@@ -48,6 +48,7 @@
             <span id="zoomLabel">1.0x</span>
         </div>
         <div id="camInfo"></div>
+        <button onclick="resetCameraConfig()" style="font-size:13px;padding:4px 10px;margin-top:8px;">重置本机镜头设置</button>
     </div>
 
     <div id="result" class="info">正在获取摄像头权限...</div>
@@ -64,7 +65,7 @@
 
     <script>
         const STORAGE_KEY = 'used_tickets_v1';
-        const CAMERA_KEY = 'preferred_camera_id_v1';
+        const CONFIG_KEY = 'camera_config_v2'; // 本设备的镜头与缩放偏好：{ id, label, zoom }
         const SECRET_KEY = 'Utopia_QQ_XG_AT_6715'; // 必须与生成页一致
         const TICKET_PATTERN = /^Utopia_\d{6}_\d{3,4}$/;
 
@@ -124,6 +125,20 @@
         let cameras = [];
         let currentCameraId = null;
         let currentTrack = null;
+        let firstTimeOnDevice = false; // 本设备是否还没有保存过镜头设置
+
+        // ---- 本设备的镜头/缩放偏好（存在浏览器本地，每台手机各存各的） ----
+        function loadConfig() {
+            try { return JSON.parse(localStorage.getItem(CONFIG_KEY)); } catch (e) { return null; }
+        }
+        function saveConfig(cfg) {
+            try { localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg)); } catch (e) {}
+        }
+        function resetCameraConfig() {
+            if (!confirm('重置本机保存的镜头和缩放设置？页面将重新加载。')) return;
+            try { localStorage.removeItem(CONFIG_KEY); } catch (e) {}
+            location.reload();
+        }
 
         function updateButton() {
             const btn = document.getElementById('mainBtn');
@@ -185,9 +200,10 @@
 
             const caps = currentTrack.getCapabilities();
             if (caps.zoom) {
-                // 先尝试复位到最小倍率（至少 1x）
-                let target = Math.max(1, caps.zoom.min);
-                target = Math.min(target, caps.zoom.max);
+                // 有本机保存的缩放就用它；否则复位到 1x（若设备最小值更大则取最小值）
+                const cfg = loadConfig();
+                let target = (cfg && typeof cfg.zoom === 'number') ? cfg.zoom : Math.max(1, caps.zoom.min);
+                target = Math.min(Math.max(target, caps.zoom.min), caps.zoom.max);
                 try {
                     await currentTrack.applyConstraints({ advanced: [{ zoom: target }] });
                 } catch (e) { console.warn('zoom 复位失败：', e); }
@@ -217,6 +233,8 @@
             if (!currentTrack) return;
             try {
                 await currentTrack.applyConstraints({ advanced: [{ zoom: v }] });
+                const cfg = loadConfig() || {};
+                saveConfig({ ...cfg, id: currentCameraId, zoom: v });
                 updateCamInfo();
             } catch (e) { console.warn('zoom 调节失败：', e); }
         }
@@ -236,7 +254,15 @@
                 () => {}
             );
             currentCameraId = cameraId;
-            try { localStorage.setItem(CAMERA_KEY, cameraId); } catch (e) {}
+            // 保存镜头选择；若仍是同一个镜头（按 id 或 label 判断），保留之前存的缩放
+            const cam = cameras.find(c => c.id === cameraId);
+            const prev = loadConfig();
+            const sameCam = prev && (prev.id === cameraId || (prev.label && cam && prev.label === cam.label));
+            saveConfig({
+                id: cameraId,
+                label: cam ? cam.label : '',
+                zoom: sameCam && typeof prev.zoom === 'number' ? prev.zoom : null
+            });
 
             const video = document.querySelector('#reader video');
             currentTrack = (video && video.srcObject) ? video.srcObject.getVideoTracks()[0] : null;
@@ -253,10 +279,13 @@
                 console.log('摄像头列表：', cameras);
                 if (!cameras.length) throw new Error('未找到可用摄像头');
 
-                // 优先使用上次手动选定的镜头，其次自动挑选
-                let savedId = null;
-                try { savedId = localStorage.getItem(CAMERA_KEY); } catch (e) {}
-                const saved = cameras.find(c => c.id === savedId);
+                // 优先使用本机保存的镜头（按 id 匹配，id 变了则按 label 匹配），否则自动挑选
+                const cfg = loadConfig();
+                const saved = cfg && (
+                    cameras.find(c => c.id === cfg.id) ||
+                    (cfg.label ? cameras.find(c => c.label === cfg.label) : null)
+                );
+                firstTimeOnDevice = !saved;
                 const chosen = saved || pickCamera(cameras);
 
                 currentCameraId = chosen.id;
@@ -281,7 +310,9 @@
                 state = 'ready';
                 btn.disabled = false;
                 updateButton();
-                showResult('info', '摄像头已就绪，点击“开始核销”扫描');
+                showResult('info', firstTimeOnDevice
+                    ? '首次在本设备使用：若画面过大或过小，请在下方切换镜头或拖动缩放，设置会自动记住。调好后点击“开始核销”'
+                    : '摄像头已就绪，点击“开始核销”扫描');
             }
         }
 
