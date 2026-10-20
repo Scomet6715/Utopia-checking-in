@@ -8,6 +8,8 @@
     <style>
         body { font-family: sans-serif; text-align: center; padding: 20px; }
         #reader { width: 100%; max-width: 400px; margin: 0 auto; background: #000; min-height: 200px; }
+        /* 限制取景画面高度，避免竖屏流把取景框拉得很长；contain 只留黑边，不裁切 */
+        #reader video { max-height: 60vh; object-fit: contain; }
         #result { margin-top: 20px; padding: 15px; font-size: 18px; border-radius: 8px; min-height: 30px; }
         .success { background: #d4edda; color: #155724; }
         .fail { background: #f8d7da; color: #721c24; }
@@ -18,16 +20,36 @@
         #manual-input input { padding: 8px; font-size: 16px; width: 220px; }
         #mainBtn { background: #007bff; color: white; font-weight: bold; min-width: 180px; }
         #mainBtn:disabled { background: #6c757d; cursor: not-allowed; }
+
+        #camTools { margin: 12px auto 0; max-width: 400px; font-size: 14px; color: #444; }
+        #camTools select { width: 100%; padding: 8px; font-size: 15px; }
+        #zoomRow { display: none; margin-top: 10px; align-items: center; gap: 8px; }
+        #zoomRow input[type=range] { flex: 1; }
+        #camInfo { margin-top: 8px; font-size: 12px; color: #888; word-break: break-all; text-align: left; }
     </style>
 </head>
 <body>
-    <h2>码核销</h2>
+    <h2>扫码核销</h2>
 
     <div>
         <button id="mainBtn" onclick="onMainBtnClick()" disabled>正在启动摄像头...</button>
     </div>
 
     <div id="reader"></div>
+
+    <!-- 镜头切换 / 缩放调节 / 诊断信息 -->
+    <div id="camTools">
+        <select id="cameraSelect" onchange="onCameraChange()" disabled>
+            <option>摄像头列表加载中...</option>
+        </select>
+        <div id="zoomRow">
+            <span>缩放</span>
+            <input type="range" id="zoomSlider" oninput="onZoomInput()">
+            <span id="zoomLabel">1.0x</span>
+        </div>
+        <div id="camInfo"></div>
+    </div>
+
     <div id="result" class="info">正在获取摄像头权限...</div>
 
     <div id="manual-input">
@@ -42,6 +64,7 @@
 
     <script>
         const STORAGE_KEY = 'used_tickets_v1';
+        const CAMERA_KEY = 'preferred_camera_id_v1';
         const SECRET_KEY = 'Utopia_QQ_XG_AT_6715'; // 必须与生成页一致
         const TICKET_PATTERN = /^Utopia_\d{6}_\d{3,4}$/;
 
@@ -98,20 +121,19 @@
         const html5QrCode = new Html5Qrcode("reader");
         let state = 'idle';   // idle | ready | scanning
         let scanning = false; // 防重入 + 防止未点击时误核销
+        let cameras = [];
+        let currentCameraId = null;
+        let currentTrack = null;
 
         function updateButton() {
             const btn = document.getElementById('mainBtn');
-            if (state === 'scanning') {
-                btn.textContent = '⏹ 取消核销';
-            } else {
-                btn.textContent = '🔍 开始核销';
-            }
+            btn.textContent = state === 'scanning' ? '⏹ 取消核销' : '🔍 开始核销';
         }
 
-        // ---- 选择摄像头：优先普通后置广角，避开长焦/微距/超广角 ----
-        function pickCamera(cameras) {
-            const back = cameras.filter(c => /back|environment|rear|后置/i.test(c.label));
-            const pool = back.length ? back : cameras;
+        // ---- 摄像头选择 ----
+        function pickCamera(list) {
+            const back = list.filter(c => /back|environment|rear|后置/i.test(c.label));
+            const pool = back.length ? back : list;
             return (
                 pool.find(c => /wide|广角/i.test(c.label) && !/ultra|超广角/i.test(c.label)) ||
                 pool.find(c => !/tele|长焦|macro|微距|ultra|超广角/i.test(c.label)) ||
@@ -119,81 +141,127 @@
             );
         }
 
-        // ---- 先触发授权，让 getCameras() 能拿到完整的 label ----
+        // 先触发授权，让 getCameras() 能拿到完整 label
         async function ensureCameraPermission() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 stream.getTracks().forEach(t => t.stop());
             } catch (e) {
-                // 授权失败会在后续 getCameras / start 里再报错，这里忽略
                 console.warn('预授权失败：', e);
             }
         }
 
-        // ---- 启动后微调：缩放复位 + 连续对焦（两者分开设置，互不影响） ----
-        async function applyCameraTweaks() {
-            const video = document.querySelector('#reader video');
-            if (!video || !video.srcObject) return;
-            const track = video.srcObject.getVideoTracks()[0];
-            if (!track) return;
-            const caps = track.getCapabilities ? track.getCapabilities() : {};
-            console.log('摄像头能力：', caps);
-            try { console.log('当前设置：', track.getSettings()); } catch (e) {}
-
-            // 缩放：目标 1x；若设备最小值大于 1 则取最小值，并限制在 max 以内
-            if (caps.zoom) {
-                let target = Math.max(1, caps.zoom.min);
-                if (caps.zoom.max !== undefined) target = Math.min(target, caps.zoom.max);
-                try {
-                    await track.applyConstraints({ advanced: [{ zoom: target }] });
-                    console.log('已设置 zoom =', target);
-                } catch (e) { console.warn('zoom 设置失败：', e); }
-            }
-
-            // 对焦：单独设置
-            if (caps.focusMode && caps.focusMode.includes('continuous')) {
-                try {
-                    await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
-                } catch (e) { console.warn('对焦设置失败：', e); }
-            }
+        function populateCameraSelect() {
+            const sel = document.getElementById('cameraSelect');
+            sel.innerHTML = '';
+            cameras.forEach((c, i) => {
+                const opt = document.createElement('option');
+                opt.value = c.id;
+                opt.textContent = `${i + 1}. ${c.label || '摄像头'}`;
+                sel.appendChild(opt);
+            });
+            if (currentCameraId) sel.value = currentCameraId;
+            sel.disabled = cameras.length <= 1;
         }
 
-        // ---- 启动摄像头 ----
+        // ---- 缩放 / 诊断信息 ----
+        function updateCamInfo() {
+            const info = document.getElementById('camInfo');
+            if (!currentTrack) { info.textContent = ''; return; }
+            let s = {}, caps = {};
+            try { s = currentTrack.getSettings(); } catch (e) {}
+            try { caps = currentTrack.getCapabilities ? currentTrack.getCapabilities() : {}; } catch (e) {}
+            const zoomText = caps.zoom
+                ? `zoom 范围 ${caps.zoom.min}~${caps.zoom.max}，当前 ${s.zoom ?? '未知'}`
+                : '此设备/浏览器不支持 zoom 调节';
+            info.textContent = `镜头：${currentTrack.label || '未知'} ｜ 分辨率：${s.width || '?'}x${s.height || '?'} ｜ ${zoomText}`;
+        }
+
+        async function setupZoomUI() {
+            const row = document.getElementById('zoomRow');
+            const slider = document.getElementById('zoomSlider');
+            row.style.display = 'none';
+            if (!currentTrack || !currentTrack.getCapabilities) { updateCamInfo(); return; }
+
+            const caps = currentTrack.getCapabilities();
+            if (caps.zoom) {
+                // 先尝试复位到最小倍率（至少 1x）
+                let target = Math.max(1, caps.zoom.min);
+                target = Math.min(target, caps.zoom.max);
+                try {
+                    await currentTrack.applyConstraints({ advanced: [{ zoom: target }] });
+                } catch (e) { console.warn('zoom 复位失败：', e); }
+
+                const s = currentTrack.getSettings();
+                slider.min = caps.zoom.min;
+                slider.max = caps.zoom.max;
+                slider.step = caps.zoom.step || 0.1;
+                slider.value = s.zoom ?? target;
+                document.getElementById('zoomLabel').textContent = Number(slider.value).toFixed(1) + 'x';
+                row.style.display = 'flex';
+            }
+
+            // 对焦单独设置
+            if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                try {
+                    await currentTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+                } catch (e) { console.warn('对焦设置失败：', e); }
+            }
+            updateCamInfo();
+        }
+
+        async function onZoomInput() {
+            const slider = document.getElementById('zoomSlider');
+            const v = parseFloat(slider.value);
+            document.getElementById('zoomLabel').textContent = v.toFixed(1) + 'x';
+            if (!currentTrack) return;
+            try {
+                await currentTrack.applyConstraints({ advanced: [{ zoom: v }] });
+                updateCamInfo();
+            } catch (e) { console.warn('zoom 调节失败：', e); }
+        }
+
+        // ---- 启动指定摄像头（不指定分辨率，保持浏览器默认的取景比例） ----
+        async function startCamera(cameraId) {
+            await html5QrCode.start(
+                { deviceId: { exact: cameraId } },
+                {
+                    fps: 15,
+                    qrbox: (w, h) => {
+                        const size = Math.min(300, Math.max(150, Math.floor(Math.min(w, h) * 0.7)));
+                        return { width: size, height: size };
+                    }
+                },
+                onScanSuccess,
+                () => {}
+            );
+            currentCameraId = cameraId;
+            try { localStorage.setItem(CAMERA_KEY, cameraId); } catch (e) {}
+
+            const video = document.querySelector('#reader video');
+            currentTrack = (video && video.srcObject) ? video.srcObject.getVideoTracks()[0] : null;
+            await setupZoomUI();
+        }
+
         async function bootCamera(autoScan) {
             const btn = document.getElementById('mainBtn');
             btn.disabled = true;
 
             try {
-                // 1. 先授权，保证能拿到摄像头 label
                 await ensureCameraPermission();
-
-                // 2. 枚举并挑选合适的镜头
-                const cameras = await Html5Qrcode.getCameras();
+                cameras = await Html5Qrcode.getCameras();
                 console.log('摄像头列表：', cameras);
-                const chosenCamera = pickCamera(cameras);
-                if (!chosenCamera) {
-                    throw new Error('未找到可用摄像头');
-                }
+                if (!cameras.length) throw new Error('未找到可用摄像头');
 
-                // 3. 启动时就限制分辨率，避免拿到高分辨率/裁切放大的流
-                await html5QrCode.start(
-                    { deviceId: { exact: chosenCamera.id } },
-                    {
-                        fps: 15,
-                        // 扫描框按视口比例，不写死像素
-                        qrbox: (w, h) => {
-                            const size = Math.max(150, Math.floor(Math.min(w, h) * 0.7));
-                            return { width: size, height: size };
-                        },
-                        videoConstraints: {
-                            deviceId: { exact: chosenCamera.id },
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 }
-                        }
-                    },
-                    onScanSuccess,
-                    () => {}
-                );
+                // 优先使用上次手动选定的镜头，其次自动挑选
+                let savedId = null;
+                try { savedId = localStorage.getItem(CAMERA_KEY); } catch (e) {}
+                const saved = cameras.find(c => c.id === savedId);
+                const chosen = saved || pickCamera(cameras);
+
+                currentCameraId = chosen.id;
+                populateCameraSelect();
+                await startCamera(chosen.id);
             } catch (err) {
                 state = 'idle';
                 btn.disabled = false;
@@ -201,9 +269,6 @@
                 showResult('fail', '摄像头启动失败，请点击按钮重试：' + err);
                 return;
             }
-
-            // 4. 启动后复位缩放、设置对焦
-            await applyCameraTweaks();
 
             if (autoScan) {
                 state = 'scanning';
@@ -218,6 +283,34 @@
                 updateButton();
                 showResult('info', '摄像头已就绪，点击“开始核销”扫描');
             }
+        }
+
+        // ---- 手动切换镜头 ----
+        async function onCameraChange() {
+            const sel = document.getElementById('cameraSelect');
+            const btn = document.getElementById('mainBtn');
+            const newId = sel.value;
+            if (!newId || newId === currentCameraId) return;
+
+            btn.disabled = true;
+            sel.disabled = true;
+            scanning = false;
+            showResult('info', '正在切换镜头...');
+            try { await html5QrCode.stop(); } catch (e) {}
+            currentTrack = null;
+
+            try {
+                await startCamera(newId);
+                try { await html5QrCode.pause(); } catch (e) {}
+                state = 'ready';
+                showResult('info', '镜头已切换，点击“开始核销”扫描');
+            } catch (err) {
+                state = 'idle';
+                showResult('fail', '切换镜头失败：' + err);
+            }
+            sel.disabled = cameras.length <= 1;
+            btn.disabled = false;
+            updateButton();
         }
 
         // ---- 开始识别 ----
