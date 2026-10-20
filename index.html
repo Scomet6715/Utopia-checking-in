@@ -115,7 +115,7 @@
             }
         }
 
-        // ---- 启动摄像头（autoScan=true 时启动后直接进入识别） ----
+        // ---- 启动摄像头 ----
         async function bootCamera(autoScan) {
             const btn = document.getElementById('mainBtn');
             btn.disabled = true;
@@ -134,14 +134,13 @@
                 return;
             }
 
-            // 启动后延迟应用连续对焦（画面已在运行，约束才生效）
+            // 只应用连续对焦，绝对不要在这里加 zoom
             setTimeout(async () => {
                 try {
                     await html5QrCode.applyVideoConstraints({
-                        focusMode: "continuous",
-                        advanced: [{ zoom: 1.5 }]
+                        focusMode: "continuous"
                     });
-                    console.log('对焦约束已应用');
+                    console.log('连续对焦约束已应用');
                 } catch (e) {
                     console.warn('应用对焦约束失败（设备可能不支持）:', e);
                 }
@@ -154,7 +153,6 @@
                 updateButton();
                 showResult('info', '请将二维码对准取景框...');
             } else {
-                // 启动后立刻暂停，摄像头保持开启但不识别
                 try { await html5QrCode.pause(); } catch (e) {}
                 state = 'ready';
                 btn.disabled = false;
@@ -189,7 +187,6 @@
         // ---- 主按钮 ----
         async function onMainBtnClick() {
             if (state === 'idle') {
-                // 自动授权失败后的兜底：点击时先启动摄像头，再直接进入扫描
                 await bootCamera(true);
                 return;
             }
@@ -205,11 +202,9 @@
 
         // ---- 扫码成功回调 ----
         async function onScanSuccess(decodedText) {
-            // 双重保险：未处于点击后的扫描状态，一律忽略
             if (!scanning) return;
             scanning = false;
 
-            // 立即暂停识别，摄像头保持开启
             try { await html5QrCode.pause(); } catch (e) {}
             state = 'ready';
             updateButton();
@@ -254,7 +249,7 @@
         // ---- 页面加载：自动申请权限、启动摄像头并暂停 ----
         window.addEventListener('load', () => {
             updateButton();
-            bootCamera(false); // false = 启动后立刻暂停，等待用户点击“开始核销”
+            bootCamera(false);
         });
     </script>
 </body>
