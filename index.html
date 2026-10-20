@@ -21,7 +21,7 @@
     </style>
 </head>
 <body>
-    <h2>扫码核销</h2>
+    <h2>核销</h2>
 
     <div>
         <button id="mainBtn" onclick="onMainBtnClick()" disabled>正在启动摄像头...</button>
@@ -134,7 +134,7 @@
                 return;
             }
 
-            // 只应用连续对焦，绝对不要在这里加 zoom
+            // 只应用连续对焦，绝对不要在这里加 
             setTimeout(async () => {
                 try {
                     await html5QrCode.applyVideoConstraints({
