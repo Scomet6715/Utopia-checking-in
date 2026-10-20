@@ -21,7 +21,7 @@
     </style>
 </head>
 <body>
-    <h2>扫码核销</h2>
+    <h2>扫码</h2>
 
     <div>
         <button id="mainBtn" onclick="onMainBtnClick()" disabled>正在启动摄像头...</button>
@@ -103,8 +103,14 @@
             fps: 15,
             qrbox: { width: 250, height: 250 },
             aspectRatio: 1.0,
-            focusMode: "continuous"
-        };
+            focusMode: "continuous",
+            // 尝试请求一个较高的分辨率，有时会迫使浏览器使用主摄（广角）
+            videoConstraints: {
+                facingMode: "environment",
+                width: { min: 1280, ideal: 1920 },
+                height: { min: 720, ideal: 1080 }
+            }
+};
 
         function updateButton() {
             const btn = document.getElementById('mainBtn');
