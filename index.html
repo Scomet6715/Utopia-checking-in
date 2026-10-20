@@ -21,7 +21,7 @@
     </style>
 </head>
 <body>
-    <h2>扫码核</h2>
+    <h2>码核销</h2>
 
     <div>
         <button id="mainBtn" onclick="onMainBtnClick()" disabled>正在启动摄像头...</button>
@@ -99,12 +99,6 @@
         let state = 'idle';   // idle | ready | scanning
         let scanning = false; // 防重入 + 防止未点击时误核销
 
-        let scanConfig = {
-            fps: 15,
-            qrbox: { width: 250, height: 250 },
-            // 不设置 aspectRatio，避免画面被裁切放大
-        };
-
         function updateButton() {
             const btn = document.getElementById('mainBtn');
             if (state === 'scanning') {
@@ -114,28 +108,89 @@
             }
         }
 
+        // ---- 选择摄像头：优先普通后置广角，避开长焦/微距/超广角 ----
+        function pickCamera(cameras) {
+            const back = cameras.filter(c => /back|environment|rear|后置/i.test(c.label));
+            const pool = back.length ? back : cameras;
+            return (
+                pool.find(c => /wide|广角/i.test(c.label) && !/ultra|超广角/i.test(c.label)) ||
+                pool.find(c => !/tele|长焦|macro|微距|ultra|超广角/i.test(c.label)) ||
+                pool[0]
+            );
+        }
+
+        // ---- 先触发授权，让 getCameras() 能拿到完整的 label ----
+        async function ensureCameraPermission() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                stream.getTracks().forEach(t => t.stop());
+            } catch (e) {
+                // 授权失败会在后续 getCameras / start 里再报错，这里忽略
+                console.warn('预授权失败：', e);
+            }
+        }
+
+        // ---- 启动后微调：缩放复位 + 连续对焦（两者分开设置，互不影响） ----
+        async function applyCameraTweaks() {
+            const video = document.querySelector('#reader video');
+            if (!video || !video.srcObject) return;
+            const track = video.srcObject.getVideoTracks()[0];
+            if (!track) return;
+            const caps = track.getCapabilities ? track.getCapabilities() : {};
+            console.log('摄像头能力：', caps);
+            try { console.log('当前设置：', track.getSettings()); } catch (e) {}
+
+            // 缩放：目标 1x；若设备最小值大于 1 则取最小值，并限制在 max 以内
+            if (caps.zoom) {
+                let target = Math.max(1, caps.zoom.min);
+                if (caps.zoom.max !== undefined) target = Math.min(target, caps.zoom.max);
+                try {
+                    await track.applyConstraints({ advanced: [{ zoom: target }] });
+                    console.log('已设置 zoom =', target);
+                } catch (e) { console.warn('zoom 设置失败：', e); }
+            }
+
+            // 对焦：单独设置
+            if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                try {
+                    await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+                } catch (e) { console.warn('对焦设置失败：', e); }
+            }
+        }
+
         // ---- 启动摄像头 ----
         async function bootCamera(autoScan) {
             const btn = document.getElementById('mainBtn');
             btn.disabled = true;
 
             try {
-                // 1. 主动获取所有摄像头，选择第一个后置广角镜头
-                const cameras = await Html5Qrcode.getCameras();
-                // 筛选后置摄像头（label 通常包含 "back" 或 "environment"）
-                const backCameras = cameras.filter(cam =>
-                    /back|environment|rear/i.test(cam.label)
-                );
-                const chosenCamera = backCameras.length > 0 ? backCameras[0] : cameras[0];
+                // 1. 先授权，保证能拿到摄像头 label
+                await ensureCameraPermission();
 
+                // 2. 枚举并挑选合适的镜头
+                const cameras = await Html5Qrcode.getCameras();
+                console.log('摄像头列表：', cameras);
+                const chosenCamera = pickCamera(cameras);
                 if (!chosenCamera) {
                     throw new Error('未找到可用摄像头');
                 }
 
-                // 2. 用 deviceId 启动，避免 facingMode 选到长焦
+                // 3. 启动时就限制分辨率，避免拿到高分辨率/裁切放大的流
                 await html5QrCode.start(
-                    chosenCamera.id,
-                    scanConfig,
+                    { deviceId: { exact: chosenCamera.id } },
+                    {
+                        fps: 15,
+                        // 扫描框按视口比例，不写死像素
+                        qrbox: (w, h) => {
+                            const size = Math.max(150, Math.floor(Math.min(w, h) * 0.7));
+                            return { width: size, height: size };
+                        },
+                        videoConstraints: {
+                            deviceId: { exact: chosenCamera.id },
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 }
+                        }
+                    },
                     onScanSuccess,
                     () => {}
                 );
@@ -147,26 +202,8 @@
                 return;
             }
 
-            // 3. 启动后直接应用连续对焦和最小缩放（不再等 2 秒）
-            try {
-                const videoElement = document.querySelector('#reader video');
-                if (videoElement && videoElement.srcObject) {
-                    const track = videoElement.srcObject.getVideoTracks()[0];
-                    const capabilities = track.getCapabilities();
-                    console.log('摄像头能力：', capabilities); // 关键调试信息
-
-                    // 组合对焦和缩放约束
-                    const constraints = { focusMode: 'continuous' };
-                    if (capabilities.zoom) {
-                        // 强制设为最小缩放（通常就是 1x 广角）
-                        constraints.zoom = capabilities.zoom.min;
-                    }
-                    await track.applyConstraints(constraints);
-                    console.log('已应用对焦/缩放约束：', constraints);
-                }
-            } catch (e) {
-                console.warn('应用对焦/缩放约束失败：', e);
-            }
+            // 4. 启动后复位缩放、设置对焦
+            await applyCameraTweaks();
 
             if (autoScan) {
                 state = 'scanning';
