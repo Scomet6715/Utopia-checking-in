@@ -21,7 +21,7 @@
     </style>
 </head>
 <body>
-    <h2>核销</h2>
+    <h2>扫码核销</h2>
 
     <div>
         <button id="mainBtn" onclick="onMainBtnClick()" disabled>正在启动摄像头...</button>
@@ -134,15 +134,34 @@
                 return;
             }
 
-            // 只应用连续对焦，绝对不要在这里加 
+            // 只应用连续对焦，绝对不要在这里加 zoom
             setTimeout(async () => {
                 try {
-                    await html5QrCode.applyVideoConstraints({
-                        focusMode: "continuous"
-                    });
+                    // 1. 依然先尝试应用连续对焦
+                    await html5QrCode.applyVideoConstraints({ focusMode: "continuous" });
                     console.log('连续对焦约束已应用');
+
+                    // 2. 直接操作底层的 video track 来强制重置缩放
+                    const videoElement = document.querySelector('#reader video');
+                    if (videoElement && videoElement.srcObject) {
+                        const track = videoElement.srcObject.getVideoTracks()[0];
+                        const capabilities = track.getCapabilities();
+
+                        // 3. 检查设备是否支持 zoom 功能
+                        if (capabilities.zoom) {
+                            const minZoom = capabilities.zoom.min;
+                            // 直接将 zoom 设置为设备支持的最小值（通常是 1x 广角）
+                            // 这一步可以覆盖掉摄像头启动时默认的最大缩放
+                            await track.applyConstraints({
+                                advanced: [{ zoom: minZoom }]
+                            });
+                            console.log('缩放已强制重置为最小值:', minZoom);
+                        } else {
+                            console.warn('当前设备/浏览器不支持通过网页控制缩放。');
+                        }
+                    }
                 } catch (e) {
-                    console.warn('应用对焦约束失败（设备可能不支持）:', e);
+                    console.warn('应用对焦/缩放约束失败:', e);
                 }
             }, 2000);
 
